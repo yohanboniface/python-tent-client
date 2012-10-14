@@ -12,7 +12,7 @@ from colors import blue, yellow, red, cyan, magenta, green, white
 from exception import ConnectionFailure
 
 # Set this to True to get a ton of debugging info printed to the screen
-debug = False
+debug = True
 retries = 10
 
 
