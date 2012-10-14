@@ -1,90 +1,23 @@
 #!/usr/bin/env python
 
 from __future__ import division
-import time
-import random
+
 import os
-import pprint
-import string
-import hashlib
-import hmac
-from base64 import b64encode
+import time
 import json
 import requests
-from urllib import urlencode, quote
+import webbrowser
+
+from urllib import urlencode
 from urlparse import urlparse
-from colors import *
+
+from exception import DiscoveryFailure, RegistrationFailure, AuthRequestFailure
+from utils import (buildHmacSha256AuthHeader, retry, removeUnicode,
+                    debugDetail, debugMain, debugAuth, debugJson, debugRequest,
+                    debugRaw, debugError, randomString)
 
 requests.defaults.defaults['danger_mode'] = True
 
-class DiscoveryFailure(Exception): pass
-class RegistrationFailure(Exception): pass
-class AuthRequestFailure(Exception): pass
-class ConnectionFailure(Exception): pass
-
-#-------------------------------------------------------------------------------------
-#--- UTILS
-
-# Set this to True to get a ton of debugging info printed to the screen
-debug = False
-retries = 10
-
-def debugAuth(s=''):
-    if debug: print blue('%s'%s)
-def debugMain(s=''):
-    if debug: print yellow('%s'%s)
-def debugError(s=''):
-    if debug: print red('ERROR: %s'%s)
-def debugDetail(s=''):
-    if debug: print cyan('    %s'%s)
-def debugJson(s=''):
-    if debug: print magenta(pprint.pformat(s))
-def debugRequest(s=''):
-    if debug: print green(' >> %s'%s)
-def debugRaw(s=''):
-    if debug: print white('>       '+s.replace('\n','\n>       '))
-
-def randomString():
-    return ''.join([random.choice(string.letters+string.digits) for x in xrange(20)])
-
-def removeUnicode(s):
-    if type(s) == unicode:
-        return s.encode('utf8')
-    return s
-
-def buildHmacSha256AuthHeader(mac_key_id,mac_key,method,resource,hostname,port):
-    """Return an authentication header as per 
-    http://tools.ietf.org/html/draft-ietf-oauth-v2-http-mac-01
-    """
-    debugMain('HMAC SHA 256')
-    debugDetail('mac key id: %s'%repr(mac_key_id))
-    debugDetail('mac key: %s'%repr(mac_key))
-
-    timestamp = int(time.time())
-    nonce = randomString()
-
-    msg = '\n'.join([str(timestamp), nonce, method, resource, hostname, str(port), '', ''])
-    debugDetail('input to hash: '+repr(msg))
-    debugRaw(msg)
-   
-    digest = hmac.new(removeUnicode(mac_key),removeUnicode(msg),hashlib.sha256).digest()
-    mac = removeUnicode(b64encode(digest).decode()) # this produces unicode for some reason
-    authHeader = 'MAC id="%s" ts="%s" nonce="%s" mac="%s"'%(removeUnicode(mac_key_id), timestamp, nonce, mac)
-    debugDetail('auth header:')
-    debugRaw(authHeader)
-    return authHeader
-
-def retry(method,*args,**kwargs):
-    for ii in range(retries):
-        try:
-            return method(*args,**kwargs)
-        except requests.exceptions.HTTPError:
-            debugError('http error.  retrying... (that was attempt %s of %s)'%(ii,retries))
-        except requests.exceptions.ConnectionError:
-            debugError('connection error.  retrying... (that was attempt %s of %s)'%(ii,retries))
-        time.sleep(1)
-    print 'tried too many times'
-    raise ConnectionFailure
 
 #-------------------------------------------------------------------------------------
 #--- CONSTANTS
@@ -93,39 +26,47 @@ DEFAULT_HEADERS = {
     'Accept': 'application/vnd.tent.v0+json',
 }
 
+
 #-------------------------------------------------------------------------------------
 #--- KEYSTORE
 
+
 class KeyStore(object):
-    def __init__(self,filename):
+
+    def __init__(self, filename):
         self.filename = filename
         if os.path.exists(self.filename):
             self.keys = self._load()
         else:
-            self.keys = {} # mapping from entityUrl to key dictionaries
+            self.keys = {}  # mapping from entityUrl to key dictionaries
 
-    def save(self,entityUrl,keys):
+    def save(self, entityUrl, keys):
         self.keys[entityUrl] = keys
         self._save()
 
-    def get(self,entityUrl,ifNotFound=None):
-        result = self.keys.get(entityUrl,None)
-        if result is None: return ifNotFound
+    def get(self, entityUrl, ifNotFound=None):
+        result = self.keys.get(entityUrl, None)
+        if result is None:
+            return ifNotFound
         resultNoUnicode = {}
-        for k,v in result.items():
+        for k, v in result.items():
             resultNoUnicode[removeUnicode(k)] = removeUnicode(v)
         return resultNoUnicode
 
     def _save(self):
-        open(self.filename,'w').write(   json.dumps(self.keys, sort_keys=True, indent=4)+'\n'   )
+        open(self.filename, 'w').write(json.dumps(self.keys, sort_keys=True, indent=4) + '\n')
+
     def _load(self):
-        return json.loads(   open(self.filename,'r').read()   )
+        return json.loads(open(self.filename, 'r').read())
+
 
 #-------------------------------------------------------------------------------------
 #--- APP
 
+
 class TentApp(object):
-    def __init__(self,entityUrl):
+
+    def __init__(self, entityUrl):
         """The first time you call this you must set entityUrl.
         After that you can omit it and it will be read from the auth config file.
         If entityUrl is None and there is no auth config file, an error will be raised.
@@ -153,7 +94,7 @@ class TentApp(object):
             The entityUrl will be shown to other users in their Tent apps as a way of
             identifying you.
         """
-        debugMain('init: entityUrl = %s'%entityUrl)
+        debugMain('init: entityUrl = %s' % entityUrl)
 
         self.entityUrl = entityUrl
 
@@ -220,20 +161,19 @@ class TentApp(object):
         headers['Host'] = urlparse(self.entityUrl).netloc
         self.session = requests.session(hooks={"pre_request": self._authHook}, headers=headers)
 
-
     #------------------------------------
     #--- misc helpers
 
     def hasRegistrationKeys(self):
-        return bool(    'registration_mac_key' in self.keys    \
-                    and 'registration_mac_key_id' in self.keys \
-                    and 'appID' in self.keys )
+        return bool('registration_mac_key' in self.keys
+                    and 'registration_mac_key_id' in self.keys
+                    and 'appID' in self.keys)
 
     def hasPermanentKeys(self):
-        return bool(    'permanent_mac_key' in self.keys \
-                    and 'permanent_mac_key_id' in self.keys )
+        return bool('permanent_mac_key' in self.keys
+                    and 'permanent_mac_key_id' in self.keys)
 
-    def _authHook(self,req):
+    def _authHook(self, req):
         # hook up sign_request() to be called on every request
         # using the current value of self.mac_key_id and self.mac_key
 
@@ -252,28 +192,32 @@ class TentApp(object):
             mac_key = self.keys['registration_mac_key']
             mac_key_id = self.keys['registration_mac_key_id']
         else:
-            1/0
+            1 / 0
 
-        debugAuth('  mac key id: %s'%repr(mac_key_id))
-        debugAuth('  mac key: %s'%repr(mac_key))
+        debugAuth('  mac key id: %s' % repr(mac_key_id))
+        debugAuth('  mac key: %s' % repr(mac_key))
 
         parsed = urlparse(req.full_url)
         port = 80
-        if parsed.scheme == "https": port = 443
+        if parsed.scheme == "https":
+            port = 443
         resource = parsed.path
-        if parsed.query: resource = parsed.path + '?' + parsed.query
-        req.headers['Authorization'] = buildHmacSha256AuthHeader(mac_key_id = mac_key_id,
-                                                                 mac_key = mac_key,
-                                                                 method = req.method,
-                                                                 resource = resource,
-                                                                 hostname = parsed.hostname,
-                                                                 port = port)
+        if parsed.query:
+            resource = parsed.path + '?' + parsed.query
+        req.headers['Authorization'] = buildHmacSha256AuthHeader(
+            mac_key_id=mac_key_id,
+            mac_key=mac_key,
+            method=req.method,
+            resource=resource,
+            hostname=parsed.hostname,
+            port=port
+        )
         return req
 
     #------------------------------------
     #--- server discovery
 
-    def _discoverAPIUrls(self,entityUrl):
+    def _discoverAPIUrls(self, entityUrl):
         """set self.apiRootUrls, return None
         On failure, raise DiscoveryFailure
         """
@@ -283,25 +227,25 @@ class TentApp(object):
         profileUrls = []
 
         # Get self.entityUrl doing just a HEAD request so we can get Link headers
-        debugRequest('head request for discovery: %s'%entityUrl)
-        r = retry(self.session.head,url=entityUrl)
+        debugRequest('head request for discovery: %s' % entityUrl)
+        r = retry(self.session.head, url=entityUrl)
         try:
             # Look in HTTP header for Link: foo; rel="$REL_PROFILE"
             # TODO: The requests API here only returns one link even when there are more than one in the
             #  header.  I think it returns the last one, but we should be using the first one.
-            profileUrls = [ r.links['https://tent.io/rels/profile']['url'] ]
+            profileUrls = [r.links['https://tent.io/rels/profile']['url']]
         except KeyError:
             # No Link header.  Have to look in the body for a <link> tag.
             try:
-                debugRequest('get request for discovery: %s'%entityUrl)
-                r = retry(self.session.get,url=entityUrl)
+                debugRequest('get request for discovery: %s' % entityUrl)
+                r = retry(self.session.get, url=entityUrl)
                 links = r.text.split('<link')[1:]
                 links = [link.split('>')[0] for link in links]
                 links = [link for link in links if 'rel="https://tent.io/rels/profile"' in link]
                 links = [link.split('href="')[1].split('"')[0] for link in links]
                 profileUrls = [removeUnicode(link) for link in links]
             except IndexError:
-                raise DiscoveryFailure() # couldn't find Link header or <link> tag
+                raise DiscoveryFailure()  # couldn't find Link header or <link> tag
 
         # Convert relative profile urls to absolute.
         # This assumes they are relative to the entityUrl.
@@ -310,29 +254,28 @@ class TentApp(object):
             if profileUrls[ii].startswith('/'):
                 profileUrls[ii] = entityUrl + profileUrls[ii]
 
-        debugDetail('profile URLs: %s'%profileUrls)
+        debugDetail('profile URLs: %s' % profileUrls)
 
         # Hit the profile URL to get the official entityUrl and apiRootUrls
-        debugRequest('get request to profile: %s'%profileUrls[0])
+        debugRequest('get request to profile: %s' % profileUrls[0])
         # Can't use our session here because it has a hardcoded Host header
         # which points at the original entityUrl.
         # But now we want to get the profileUrl, which is maybe on a different host.
-        r = retry(requests.get,profileUrls[0],headers=DEFAULT_HEADERS)
+        r = retry(requests.get, profileUrls[0], headers=DEFAULT_HEADERS)
         profile = r.json
         self.entityUrl = removeUnicode(profile['https://tent.io/types/info/core/v0.1.0']['entity'])
         self.apiRootUrls = profile['https://tent.io/types/info/core/v0.1.0']['servers']
         self.apiRootUrls = [removeUnicode(url) for url in self.apiRootUrls]
 
-        debugDetail('apiRootUrls = %s'%self.apiRootUrls)
-        debugDetail('entityUrl = %s'%self.entityUrl)
-
+        debugDetail('apiRootUrls = %s' % self.apiRootUrls)
+        debugDetail('entityUrl = %s' % self.entityUrl)
 
     #------------------------------------
     #--- OAuth
 
     def register(self):
         """Register this app with the server.  This should only be done once for a given user.
-        You can check if this has already happened by calling hasRegistrationKeys() to 
+        You can check if this has already happened by calling hasRegistrationKeys() to
         check if this app's .keys have registration keys already.
 
         Preconditions for self.keys: none
@@ -360,7 +303,7 @@ class TentApp(object):
         headers['Content-Type'] = 'application/vnd.tent.v0+json'
 
         requestUrl = self.apiRootUrls[0] + '/apps'
-        debugRequest('posting to %s'%requestUrl)
+        debugRequest('posting to %s' % requestUrl)
         r = retry(requests.post, requestUrl, data=json.dumps(appInfoJson), headers=headers)
 
         # get oauth key in response
@@ -376,8 +319,7 @@ class TentApp(object):
         self.keys['registration_mac_key_id'] = r.json['mac_key_id'].encode('utf-8')
         self.keys['registration_mac_key'] = r.json['mac_key'].encode('utf-8')
         debugDetail('registered successfully.  details:')
-        debugDetail('  %s'%self.keys)
-
+        debugDetail('  %s' % self.keys)
 
     def getUserApprovalURL(self):
         """Return a URL on the user's tent server that the user should visit
@@ -406,7 +348,8 @@ class TentApp(object):
             'tent_profile_info_types': 'all',
             'tent_post_types': 'all',
         }
-        if self.appDetails.get('postNotificationURL',None):
+        if self.appDetails.get('postNotificationURL',
+            None):
             params['tent_notification_url'] = self.appDetails['postNotificationUrl']
         debugJson(params)
         requestUrl = self.apiRootUrls[0] + '/oauth/authorize'
@@ -414,8 +357,7 @@ class TentApp(object):
 
         return urlWithParams
 
-
-    def getPermanentKeys(self,code,state=None):
+    def getPermanentKeys(self, code, state=None):
         """After the user has approved the app at their tent server, they'll be redirected
         to self.appDetails['oauthCallbackURL'] with a code and state provided by the tent server.
         Obtain those values and call this method to get permanent keys.
@@ -433,20 +375,22 @@ class TentApp(object):
 
         assert self.hasRegistrationKeys()
         if state and state != self.keys['state']:
-            raise AuthRequestFailure # state we got back was different than the one we sent out
+            raise AuthRequestFailure  # state we got back was different than the one we sent out
 
         # trade the code for a permanent key
         # first make the auth headers are using the credentials from the registration step
-        resource = '/apps/%s/authorizations'%self.keys['appID']
-        jsonPayload = {'code':code, 'token_type':'mac'}
-
+        resource = '/apps/%s/authorizations' % self.keys['appID']
+        jsonPayload = {
+            'code': code,
+            'token_type': 'mac'
+        }
 
         # then construct and send the request
         debugDetail()
         headers = dict(DEFAULT_HEADERS)
         headers['Content-Type'] = 'application/vnd.tent.v0+json'
         requestUrl = self.apiRootUrls[0] + resource
-        debugRequest('posting to: %s'%requestUrl)
+        debugRequest('posting to: %s' % requestUrl)
         r = retry(self.session.post, requestUrl, data=json.dumps(jsonPayload), headers=headers)
 
         # display our request
@@ -470,19 +414,18 @@ class TentApp(object):
         # now we have permanent keys
         self.keys['permanent_mac_key_id'] = r.json['access_token'].encode('utf-8')
         self.keys['permanent_mac_key'] = r.json['mac_key'].encode('utf-8')
-        debugDetail('permanent mac key_id: %s'%self.keys['permanent_mac_key_id'])
-        debugDetail('permanent mac key: %s'%self.keys['permanent_mac_key'])
-        
+        debugDetail('permanent mac key_id: %s' % self.keys['permanent_mac_key_id'])
+        debugDetail('permanent mac key: %s' % self.keys['permanent_mac_key'])
 
     #------------------------------------
     #--- API methods
 
-    def _genericGet(self,resource,**kwargs):
+    def _genericGet(self, resource, **kwargs):
         """Do a get request using the provided kwargs as request parameters.
         """
         requestUrl = self.apiRootUrls[0] + resource
         debugRequest(requestUrl)
-        r = retry(self.session.get,requestUrl,params=kwargs)
+        r = retry(self.session.get, requestUrl, params=kwargs)
         if r.json is None:
             debugError('not json.  here is the actual body text:')
             debugRaw(r.text)
@@ -497,15 +440,15 @@ class TentApp(object):
         debugMain('getProfile')
         return self._genericGet('/profile')
 
-    def putProfile(profileType,value):
+    def putProfile(self, profileType, value):
         """ Set a value for one of the profile types on your profile.
         TODO: not implemented yet.
         """
         # PUT /profile/$profileType
         self.keysToUse = 'permanent'
         pass
-    
-    def follow(self,entityUrl):
+
+    def follow(self, entityUrl):
         """Begin following the given entity.
         Note that unlike the other follow-related methods, this one uses an entity URL
         instead of an id.
@@ -518,9 +461,9 @@ class TentApp(object):
         requestUrl = self.apiRootUrls[0] + resource
         headers = dict(DEFAULT_HEADERS)
         headers['Content-Type'] = 'application/vnd.tent.v0+json'
-        debugRequest('following via: %s'%requestUrl)
-        r = retry(self.session.post, requestUrl, data=json.dumps({'entity':entityUrl}), headers=headers)
-        
+        debugRequest('following via: %s' % requestUrl)
+        r = retry(self.session.post, requestUrl, data=json.dumps({'entity': entityUrl}), headers=headers)
+
         debugDetail('request headers:')
         debugJson(r.request.headers)
         debugDetail()
@@ -535,13 +478,13 @@ class TentApp(object):
         debugDetail('response body:')
         debugRaw(r.text)
         debugDetail()
-        
+
         if r.json is None:
             debugError('failed to follow.')
             debugDetail()
         return r.json
 
-    def getFollowings(self,id=None,**kwargs):
+    def getFollowings(self, id=None, **kwargs):
         """Get the entities I'm following.
         Any additional keyword arguments will be passed to the server as request parameters.
         These ones are supported by tentd:
@@ -553,22 +496,22 @@ class TentApp(object):
         self.keysToUse = 'permanent'
         debugMain('getFollowings')
         if id is None:
-            return self._genericGet('/followings',**kwargs)
+            return self._genericGet('/followings', **kwargs)
         else:
-            return self._genericGet('/followings/%s'%id,**kwargs)
+            return self._genericGet('/followings/%s' % id, **kwargs)
 
-    def unfollow(self,id):
+    def unfollow(self, id):
         """Unfollow an entity.
         To get the id, you should first call followings() to get a list of entities and their ids.
         """
         # DELETE /followings/$id
         self.keysToUse = 'permanent'
         debugMain('unfollow')
-        resource = '/followings/%s'%id
+        resource = '/followings/%s' % id
         requestUrl = self.apiRootUrls[0] + resource
-        debugRequest('unfollowing: %s'%requestUrl)
+        debugRequest('unfollowing: %s' % requestUrl)
         r = self.session.delete(requestUrl)
-        
+
         debugDetail('request headers:')
         debugJson(r.request.headers)
         debugDetail()
@@ -577,14 +520,14 @@ class TentApp(object):
         debugDetail('response headers:')
         debugJson(r.headers)
         debugDetail()
-        
+
         if r.status_code is not 200:
             debugError('failed to unfollow.')
             debugDetail()
             return False
         return True
-        
-    def getFollowers(self,id=None,**kwargs):
+
+    def getFollowers(self, id=None, **kwargs):
         """Get the entities who are following you.
         Any additional keyword arguments will be passed to the server as request parameters.
         These ones are supported by tentd:
@@ -596,11 +539,11 @@ class TentApp(object):
         # GET /followers  [/$id]
         debugMain('getFollowers')
         if id is None:
-            return self._genericGet('/followers',**kwargs)
+            return self._genericGet('/followers', **kwargs)
         else:
-            return self._genericGet('/followers/%s'%id,**kwargs)
+            return self._genericGet('/followers/%s' % id, **kwargs)
 
-    def removeFollower(self,id):
+    def removeFollower(self, id):
         """Cause someone to stop following you?
         The docs are not clear on what this does.
         To get the id, you should first call followers() to get a list of entities and their ids.
@@ -610,7 +553,7 @@ class TentApp(object):
         self.keysToUse = 'permanent'
         pass
 
-    def putPost(self,post,attachments=[]):
+    def putPost(self, post, attachments=[]):
         """Post a new post to the server.
         post should be a python dictionary representing a JSON object
         See http://tent.io/docs/post-types for examples.
@@ -624,7 +567,7 @@ class TentApp(object):
         requestUrl = self.apiRootUrls[0] + resource
         headers = dict(DEFAULT_HEADERS)
         headers['Content-Type'] = 'application/vnd.tent.v0+json'
-        debugRequest('posting to: %s'%requestUrl)
+        debugRequest('posting to: %s' % requestUrl)
         r = retry(self.session.post, requestUrl, data=json.dumps(post), headers=headers)
 
         debugDetail('request headers:')
@@ -647,7 +590,7 @@ class TentApp(object):
             debugDetail()
         return r.json
 
-    def getPosts(self,id=None,**kwargs):
+    def getPosts(self, id=None, **kwargs):
         """With no auth, fetch your own public posts.
         With auth, fetch all your posts plus incoming posts from followings and people mentioning you.
         tent.is limits this to the last 50 posts or so unless additional parameters are present.
@@ -667,11 +610,11 @@ class TentApp(object):
         self.keysToUse = 'permanent'
         debugMain('getPosts')
         if id is None:
-            return self._genericGet('/posts',**kwargs)
+            return self._genericGet('/posts', **kwargs)
         else:
-            return self._genericGet('/posts/%s'%id,**kwargs)
+            return self._genericGet('/posts/%s' % id, **kwargs)
 
-    def getPostAttachment(self,id,filename):
+    def getPostAttachment(self, id, filename):
         """Get an attachment from a post.
         TODO: not implemented yet.
         """
@@ -679,17 +622,16 @@ class TentApp(object):
         self.keysToUse = 'permanent'
         pass
 
-
     #------------------------------------
     #--- generators
 
-    def _genericGenerator(self,method,**kwargs):
+    def _genericGenerator(self, method, **kwargs):
         oldestIdSoFar = None
         while True:
             if oldestIdSoFar is None:
                 items = method(**kwargs)
             else:
-                items = method(before_id=oldestIdSoFar,**kwargs)
+                items = method(before_id=oldestIdSoFar, **kwargs)
             if not items:
                 return
             for item in items:
@@ -697,7 +639,7 @@ class TentApp(object):
                 oldestIdSoFar = item['id']
             time.sleep(0.5)
 
-    def generatePosts(self,**kwargs):
+    def generatePosts(self, **kwargs):
         """Return a generator which iterates through all of the user's followers,
         newest first, making multiple GET requests behind the scenes.
         """
@@ -707,7 +649,7 @@ class TentApp(object):
             if oldestTimeSoFar is None:
                 items = self.getPosts(**kwargs)
             else:
-                items = self.getPosts(before_time=oldestTimeSoFar,**kwargs)
+                items = self.getPosts(before_time=oldestTimeSoFar, **kwargs)
             if not items:
                 return
             for item in items:
@@ -730,11 +672,11 @@ class TentApp(object):
         self.keysToUse = 'permanent'
         for f in self._genericGenerator(self.getFollowers):
             yield f
-            
+
     #------------------------------------
     #--- helpers
 
-    def authorizeFromCommandLine(self,keyStoreFilename):
+    def authorizeFromCommandLine(self, keyStoreFilename):
         """This is a convenience method to set up auth for a command line script
         using a KeyStore file.  It will go through all the auth steps needed, including
         asking the user to approve the app the first time it's run.
@@ -786,5 +728,3 @@ class TentApp(object):
             print '-----------'
             self.getPermanentKeys(code)
             keyStore.save(self.entityUrl, self.keys)
-
-
