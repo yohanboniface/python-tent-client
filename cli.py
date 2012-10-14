@@ -30,6 +30,7 @@ class Cli(object):
         readline.set_completer(self.completer)
         readline.parse_and_bind("tab: complete")
         self._posts = []  # TODO: store and reload posts
+        self.do_GET_help()
         print yellow('-' * 80)
 
     def print_post(self, post, idx=None):
@@ -157,7 +158,7 @@ class Cli(object):
         return self.app.entityUrl.split('//')[-1]
 
     def prompt(self):
-        command = raw_input("(Type help if...)\n[%s] " % self.intro)
+        command = raw_input("[%s] " % self.intro)
         return command
 
     def __call__(self):
