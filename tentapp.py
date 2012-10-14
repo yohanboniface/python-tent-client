@@ -15,6 +15,7 @@ from exception import DiscoveryFailure, RegistrationFailure, AuthRequestFailure
 from utils import (buildHmacSha256AuthHeader, retry, removeUnicode,
                     debugDetail, debugMain, debugAuth, debugJson, debugRequest,
                     debugRaw, debugError, randomString)
+from config import Config
 
 requests.defaults.defaults['danger_mode'] = True
 
@@ -28,45 +29,12 @@ DEFAULT_HEADERS = {
 
 
 #-------------------------------------------------------------------------------------
-#--- KEYSTORE
-
-
-class KeyStore(object):
-
-    def __init__(self, filename):
-        self.filename = filename
-        if os.path.exists(self.filename):
-            self.keys = self._load()
-        else:
-            self.keys = {}  # mapping from entityUrl to key dictionaries
-
-    def save(self, entityUrl, keys):
-        self.keys[entityUrl] = keys
-        self._save()
-
-    def get(self, entityUrl, ifNotFound=None):
-        result = self.keys.get(entityUrl, None)
-        if result is None:
-            return ifNotFound
-        resultNoUnicode = {}
-        for k, v in result.items():
-            resultNoUnicode[removeUnicode(k)] = removeUnicode(v)
-        return resultNoUnicode
-
-    def _save(self):
-        open(self.filename, 'w').write(json.dumps(self.keys, sort_keys=True, indent=4) + '\n')
-
-    def _load(self):
-        return json.loads(open(self.filename, 'r').read())
-
-
-#-------------------------------------------------------------------------------------
 #--- APP
 
 
 class TentApp(object):
 
-    def __init__(self, entityUrl):
+    def __init__(self, config=None):
         """The first time you call this you must set entityUrl.
         After that you can omit it and it will be read from the auth config file.
         If entityUrl is None and there is no auth config file, an error will be raised.
@@ -94,18 +62,12 @@ class TentApp(object):
             The entityUrl will be shown to other users in their Tent apps as a way of
             identifying you.
         """
-        debugMain('init: entityUrl = %s' % entityUrl)
 
-        self.entityUrl = entityUrl
+        self.config = config or Config()
+        self.entityUrl = self.config.get('entity', 'url')
+        debugMain('init: entityUrl = %s' % self.entityUrl)
 
-        self.appDetails = {
-            'name': 'python-tent-client',
-            'description': 'description of my app',
-            'url': 'http://zzzzexample.com',
-            'icon': 'http://zzzzexample.com/icon.png',
-            'oauthCallbackURL': 'http://zzzzexample.com/oauthcallback',
-            'postNotificationUrl': None,
-        }
+        self.appDetails = dict(self.config.items('app'))
 
         #  permissions to request
         self.scopes = {
@@ -138,7 +100,12 @@ class TentApp(object):
         #   permanent_mac_key
         #   permanent_mac_key_id
         #   state
-        self.keys = {}
+
+        try:
+            # Load auth keys from disk if they've been previously saved
+            self.keys = dict(self.config.items(self.entityUrl))
+        except self.config.NoSectionError:
+            self.keys = {}
 
         # this controls which keys are used by the auth hook
         # should be None, "registration", or "permanent"
@@ -676,7 +643,7 @@ class TentApp(object):
     #------------------------------------
     #--- helpers
 
-    def authorizeFromCommandLine(self, keyStoreFilename):
+    def authorizeFromCommandLine(self):
         """This is a convenience method to set up auth for a command line script
         using a KeyStore file.  It will go through all the auth steps needed, including
         asking the user to approve the app the first time it's run.
@@ -685,10 +652,6 @@ class TentApp(object):
             app = TentApp('https://foo.tent.is')
             app.commandLineAuthHelper('keystore.js')
         """
-        # Load auth keys from disk if they've been previously saved
-        keyStore = KeyStore(keyStoreFilename)
-        self.keys = keyStore.get(self.entityUrl, {})
-
         # Note that self.appDetails['oauthCallbackURL'] must be set before registering.
         # This is an URL for our app that the Tent server will redirect users to after
         # they approve our app.
@@ -697,7 +660,7 @@ class TentApp(object):
         # If the app has never been registered with the server, register now
         if not self.hasRegistrationKeys():
             self.register()
-            keyStore.save(self.entityUrl, self.keys)
+            self.save_keys()
 
         # Ask the user to approve our app at their Tent server.
         # After that, they'll be redirected to our callback URL.
@@ -727,4 +690,11 @@ class TentApp(object):
             code = raw_input('> ')
             print '-----------'
             self.getPermanentKeys(code)
-            keyStore.save(self.entityUrl, self.keys)
+            self.save_keys()
+
+    def save_keys(self):
+        if not self.config.parser.has_section(self.entityUrl):
+            self.config.parser.add_section(self.entityUrl)
+        for k, v in self.keys.iteritems():
+            self.config.parser.set(self.entityUrl, k, v)
+        self.config.save()
