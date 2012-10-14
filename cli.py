@@ -13,9 +13,11 @@ class Cli(object):
     """
     def __init__(self, *args, **kwargs):
         print yellow('-' * 80)
+        print yellow('LOADING...')
 
         self.app = tentapp.TentApp()
         self.app.authorizeFromCommandLine()
+        print yellow('-' * 80)
 
     def print_post(self, post):
         if post['type'] == 'https://tent.io/types/post/status/v0.1.0':
@@ -24,53 +26,70 @@ class Cli(object):
             print '    %s' % cyan(post['content']['text'])
             print
 
+    def do_help(self, *args, **kwargs):
+        print """
+        Available commands:
+        /update, /up    => update the feed
+        /status         => post a status
+        /profile        => get your profile infos
+        /followers      => get your followers list
+        /followings     => get your followings list
+        /help, /h       => display this help message and reprompt
+        """
+
+    def do_h(self, *args, **kwargs):
+        self.do_help(*args, **kwargs)
+
+    def do_up(self, *args, **kwargs):
+        self.do_update(*args, **kwargs)
+
+    def do_update(self, *args, **kwargs):
+        posts = self.app.getPosts()
+
+        # # By default posts are sorted newest first.
+        if self.app.config.get("UI", "sort") == "desc":
+            posts.sort(key=lambda p: p['published_at'])
+
+        for post in posts:
+            self.print_post(post)
+
+    def do_profile(self, *args, **kwargs):
+        print yellow('PROFILE:')
+        profile = self.app.getProfile()
+        debugJson(profile)
+
+    def do_followings(self, *args, **kwargs):
+        print yellow('FOLLOWINGS:')
+        followings = self.app.getFollowings()
+        debugJson(followings)
+
+    def do_followers(self, *args, **kwargs):
+        print yellow('FOLLOWERS:')
+        followers = self.app.getFollowers()
+        debugJson(followers)
+
+    def do_status(self, *args, **kwargs):
+        status = raw_input('Type your post:\n')
+        post = {
+            'type': 'https://tent.io/types/post/status/v0.1.0',
+            'published_at': int(time.time()),
+            'permissions': {
+                'public': True,
+            },
+            'licenses': ['http://creativecommons.org/licenses/by/3.0/'],
+            'content': {
+                'text': status,
+            }
+        }
+        self.app.putPost(post)
+
     def handle_command(self, command):
         command = command[1:]
-        if command in ("update", "up"):
-            posts = self.app.getPosts()
-
-            # # By default posts are sorted newest first.
-            if self.app.config.get("UI", "sort") == "desc":
-                posts.sort(key=lambda p: p['published_at'])
-
-            for post in posts:
-                self.print_post(post)
-        elif command == "profile":
-            print yellow('PROFILE:')
-            profile = self.app.getProfile()
-            debugJson(profile)
-        elif command == "followings":
-            print yellow('FOLLOWINGS:')
-            followings = self.app.getFollowings()
-            debugJson(followings)
-        elif command == "followers":
-            print yellow('FOLLOWERS:')
-            followers = self.app.getFollowers()
-            debugJson(followers)
-        elif command == "status":
-            status = raw_input('Type your post:\n')
-            post = {
-                'type': 'https://tent.io/types/post/status/v0.1.0',
-                'published_at': int(time.time()),
-                'permissions': {
-                    'public': True,
-                },
-                'licenses': ['http://creativecommons.org/licenses/by/3.0/'],
-                'content': {
-                    'text': status,
-                }
-            }
-            self.app.putPost(post)
-        elif command in ("help", "h"):
-            print """
-            Available commands:
-            /update, /up    => update the feed
-            /status         => post a status
-            /profile        => get your profile infos
-            /followers      => get your followers list
-            /followings     => get your followings list
-            /help, /h       => display this help message and reprompt
-            """
+        fx_name = 'do_%s' % command
+        if hasattr(self, fx_name):
+            return getattr(self, fx_name)()
+        else:
+            print red('No command with name %s' % command)
 
     def __call__(self):
         while 1:
