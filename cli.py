@@ -11,12 +11,24 @@ class Cli(object):
     """
     Tent command line manager.
     """
+
+    COMMANDS = [
+        "update",
+        "help",
+        "profile",
+        "followers",
+        "followings",
+        "status",
+    ]
+
     def __init__(self, *args, **kwargs):
         print yellow('-' * 80)
         print yellow('LOADING...')
 
         self.app = tentapp.TentApp()
         self.app.authorizeFromCommandLine()
+        readline.set_completer(self.completer)
+        readline.parse_and_bind("tab: complete")
         print yellow('-' * 80)
 
     def print_post(self, post):
@@ -25,6 +37,17 @@ class Cli(object):
             print '%s    %s' % (yellow(post['entity']), white(timestamp))
             print '    %s' % cyan(post['content']['text'])
             print
+
+    def completer(self, text, state):
+        if not text:
+            return
+        # TODO: implement following completion while writing status.
+        for cmd in self.COMMANDS:
+            if cmd.startswith(text):
+                if not state:
+                    return cmd
+                else:
+                    state -= 1
 
     def do_help(self, *args, **kwargs):
         print """
@@ -46,7 +69,7 @@ class Cli(object):
     def do_update(self, *args, **kwargs):
         posts = self.app.getPosts()
 
-        # # By default posts are sorted newest first.
+        # By default posts are sorted newest first.
         if self.app.config.get("UI", "sort") == "desc":
             posts.sort(key=lambda p: p['published_at'])
 
@@ -69,19 +92,24 @@ class Cli(object):
         debugJson(followers)
 
     def do_status(self, *args, **kwargs):
-        status = raw_input('Type your post:\n')
-        post = {
-            'type': 'https://tent.io/types/post/status/v0.1.0',
-            'published_at': int(time.time()),
-            'permissions': {
-                'public': True,
-            },
-            'licenses': ['http://creativecommons.org/licenses/by/3.0/'],
-            'content': {
-                'text': status,
+        try:
+            status = raw_input('Type your post:\n')
+        except KeyboardInterrupt:
+            print red("Status cancelled.")
+            pass
+        else:
+            post = {
+                'type': 'https://tent.io/types/post/status/v0.1.0',
+                'published_at': int(time.time()),
+                'permissions': {
+                    'public': True,
+                },
+                'licenses': ['http://creativecommons.org/licenses/by/3.0/'],
+                'content': {
+                    'text': status,
+                }
             }
-        }
-        self.app.putPost(post)
+            self.app.putPost(post)
 
     def handle_command(self, command):
         command = command[1:]
