@@ -119,10 +119,21 @@ class Cli(object):
         else:
             print red('No command with name %s' % command)
 
+    @property
+    def intro(self):
+        """
+        Return text displayed before prompt cursor.
+        """
+        return self.app.entityUrl.split('//')[-1]
+
+    def prompt(self):
+        command = raw_input("(Type /h for help)\n[%s] " % self.intro)
+        return command
+
     def __call__(self):
         while 1:
             try:
-                command = raw_input("(Type /h for help)\n[%s] " % self.app.entityUrl)
+                command = self.prompt()
                 self.handle_command(command)
             except KeyboardInterrupt:
                 print "\nExciting, bye!\n"
