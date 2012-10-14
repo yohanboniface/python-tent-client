@@ -85,7 +85,8 @@ class Cli(object):
         # Only working for personal posts currently (GET url must be
         # changed on the fly to fix this)
         post_id = self._posts[idx]['id']
-        print self.app.getPosts(id=post_id)
+        post = self.app.getPosts(id=post_id)
+        self.print_post(post)
 
     def do_GET_posts(self, *args, **kwargs):
         if len(args) > 0:
@@ -98,12 +99,12 @@ class Cli(object):
         else:
             self._posts = self.app.getPosts()
 
-        # By default posts are sorted newest first.
-        if self.app.config.get("UI", "sort") == "desc":
-            self._posts.sort(key=lambda p: p['published_at'])
+            # By default posts are sorted newest first.
+            if self.app.config.get("UI", "sort") == "desc":
+                self._posts.sort(key=lambda p: p['published_at'])
 
-        for idx, post in enumerate(self._posts):
-            self.print_post(post, idx)
+            for idx, post in enumerate(self._posts):
+                self.print_post(post, idx)
 
     def do_POST_posts(self, post_type, *args, **kwargs):
         valid_types = ['status']
